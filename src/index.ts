@@ -172,70 +172,45 @@ export class TeletaskClient {
   }
 
   /**
-   * Parse a raw response buffer from the TELETASK unit
+   * Handles a response from the unit.
+   * @param data
+   * @returns
    */
-  private parseResponse(data: Buffer): ParsedResponse | null {
-    // Check for minimum length and STX byte
-    if (data.length < 4 || data[0] !== 0x02) {
-      return null;
+  private handleResponse(data: Buffer): void {
+    // Acknowledge byte
+    if (data.length === 1 && data[0] === 0x0a) {
+      return;
     }
 
-    const length = data[1];
-    const command = data[2];
-
-    // Validate message length
-    if (data.length !== length + 1) {
-      // +1 for checksum
-      return null;
-    }
-
-    // Validate checksum
-    const calculatedChecksum = this.calculateChecksum(data.slice(0, -1));
-    const receivedChecksum = data[data.length - 1];
-    if (calculatedChecksum !== receivedChecksum) {
-      throw new Error('Invalid checksum');
+    // Invalid start byte
+    if (data[0] !== 0x02) {
+      return;
     }
 
     // Extract payload
-    const payload = data.slice(3, -1);
-
-    // Handle different response types
-    switch (command) {
-      case 0x10:
-        return {
-          type: 'event',
-          payload,
-          command: 0x10
-        };
-      case 0x0a:
-        return { type: 'acknowledge' };
-      default:
-        return {
-          type: 'unknown',
-          command,
-          payload
-        };
+    const command = data[2];
+    if (command === 0x10) {
+      this.handleEvent(data.slice(3, -1));
+    } else {
+      throw new Error(`Unknown command: ${command}`);
     }
   }
 
   /**
-   * Handle a response from the TELETASK unit.
+   * Handle an incoming event.
    */
-  private handleResponse(data: Buffer): void {
-    const response = this.parseResponse(data);
-    if (response?.type === 'event') {
-      const stateChange: StateChange = {
-        centralUnit: data[0],
-        functionType: data[1] as FunctionType,
-        number: (data[2] << 8) | data[3],
-        value: data[5]
-      };
+  private handleEvent(data: Buffer): void {
+    const stateChange: StateChange = {
+      centralUnit: data[0],
+      functionType: data[1] as FunctionType,
+      number: (data[2] << 8) | data[3],
+      value: data[5]
+    };
 
-      // Notify specific subscribers
-      this.subscribers.get(stateChange.functionType)?.forEach((callback) => {
-        callback(stateChange);
-      });
-    }
+    // Notify specific subscribers
+    this.subscribers.get(stateChange.functionType)?.forEach((callback) => {
+      callback(stateChange);
+    });
   }
 
   /**
@@ -357,7 +332,6 @@ export class TeletaskClient {
    */
   public async setSensor(centralUnit: number, sensor: number, action: SensorAction, value?: number): Promise<void> {
     const params = [centralUnit, FunctionType.SENSOR, (sensor >> 8) & 0xff, sensor & 0xff, action];
-
     if (value !== undefined) {
       params.push((value >> 8) & 0xff, value & 0xff);
     }
@@ -372,7 +346,6 @@ export class TeletaskClient {
    */
   public async setLocalMood(mood: number, state: boolean | number): Promise<void> {
     const value = typeof state === 'boolean' ? (state ? 0xff : 0x00) : Math.min(100, Math.max(0, state));
-
     this.sendCommand(Command.SET, [0, FunctionType.LOCAL_MOOD, (mood >> 8) & 0xff, mood & 0xff, value]);
   }
 
@@ -383,7 +356,6 @@ export class TeletaskClient {
    */
   public async setGeneralMood(mood: number, state: boolean | number): Promise<void> {
     const value = typeof state === 'boolean' ? (state ? 0xff : 0x00) : Math.min(100, Math.max(0, state));
-
     this.sendCommand(Command.SET, [0, FunctionType.GENERAL_MOOD, (mood >> 8) & 0xff, mood & 0xff, value]);
   }
 
