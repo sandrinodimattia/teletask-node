@@ -10,6 +10,7 @@ import {
 import { TeletaskOptions } from './types/config';
 import { StateChange, StateChangeCallback } from './types/state';
 
+import { ParsedResponse } from './lib/utils';
 import { TeletaskConnection } from './lib/connection';
 
 export class TeletaskClient {
@@ -125,20 +126,6 @@ export class TeletaskClient {
   }
 
   /**
-   * Send a raw command.
-   * @param command
-   * @param parameters
-   */
-  private sendCommand(command: number, parameters: number[]): void {
-    if (!this.isConnected()) {
-      throw new Error('Not connected to TELETASK central unit');
-    }
-
-    const buffer = this.buildCommand(command, parameters);
-    this.connection.send(buffer);
-  }
-
-  /**
    * Build a command to send to the unit.
    * @param command The command number.
    * @param parameters Parameters to send with the command
@@ -164,43 +151,91 @@ export class TeletaskClient {
   }
 
   /**
-   * Handles a response from the unit.
-   * @param data
-   * @returns
+   * Send a raw command.
+   * @param command
+   * @param parameters
    */
-  private handleResponse(data: Buffer): void {
-    // Acknowledge byte
-    if (data.length === 1 && data[0] === 0x0a) {
-      return;
+  private sendCommand(command: number, parameters: number[]): void {
+    if (!this.isConnected()) {
+      throw new Error('Not connected to TELETASK central unit');
     }
 
-    // Invalid start byte
-    if (data[0] !== 0x02) {
-      return;
+    const buffer = this.buildCommand(command, parameters);
+    this.connection.send(buffer);
+  }
+
+  /**
+   * Calculate the checksum of the incoming data.
+   */
+  private calculateChecksum(data: Buffer): number {
+    return data.reduce((sum, byte) => sum + byte, 0) & 0xff;
+  }
+
+  /**
+   * Parse a raw response buffer from the TELETASK unit
+   */
+  private parseResponse(data: Buffer): ParsedResponse | null {
+    // Check for minimum length and STX byte
+    if (data.length < 4 || data[0] !== 0x02) {
+      return null;
     }
 
+    const length = data[1];
     const command = data[2];
-    if (command === 0x10) {
-      this.handleEvent(data.slice(3, -1));
+
+    // Validate message length
+    if (data.length !== length + 1) {
+      // +1 for checksum
+      return null;
+    }
+
+    // Validate checksum
+    const calculatedChecksum = this.calculateChecksum(data.slice(0, -1));
+    const receivedChecksum = data[data.length - 1];
+    if (calculatedChecksum !== receivedChecksum) {
+      throw new Error('Invalid checksum');
+    }
+
+    // Extract payload
+    const payload = data.slice(3, -1);
+
+    // Handle different response types
+    switch (command) {
+      case 0x10:
+        return {
+          type: 'event',
+          payload,
+          command: 0x10
+        };
+      case 0x0a:
+        return { type: 'acknowledge' };
+      default:
+        return {
+          type: 'unknown',
+          command,
+          payload
+        };
     }
   }
 
   /**
-   * Handles an event message from the unit.
-   * @param data
+   * Handle a response from the TELETASK unit.
    */
-  private handleEvent(data: Buffer): void {
-    const stateChange: StateChange = {
-      centralUnit: data[0],
-      functionType: data[1] as FunctionType,
-      number: (data[2] << 8) | data[3],
-      value: data[5]
-    };
+  private handleResponse(data: Buffer): void {
+    const response = this.parseResponse(data);
+    if (response?.type === 'event') {
+      const stateChange: StateChange = {
+        centralUnit: data[0],
+        functionType: data[1] as FunctionType,
+        number: (data[2] << 8) | data[3],
+        value: data[5]
+      };
 
-    // Notify specific subscribers
-    this.subscribers.get(stateChange.functionType)?.forEach((callback) => {
-      callback(stateChange);
-    });
+      // Notify specific subscribers
+      this.subscribers.get(stateChange.functionType)?.forEach((callback) => {
+        callback(stateChange);
+      });
+    }
   }
 
   /**
@@ -271,7 +306,7 @@ export class TeletaskClient {
    * @param state
    */
   public async setRelay(centralUnit: number, relay: number, state: boolean): Promise<void> {
-    this.sendCommand(Command.SET, [
+    await this.sendCommand(Command.SET, [
       centralUnit,
       FunctionType.RELAY,
       (relay >> 8) & 0xff,
@@ -303,7 +338,6 @@ export class TeletaskClient {
   public async setMotor(centralUnit: number, motor: number, action: MotorAction): Promise<void> {
     this.sendCommand(Command.SET, [centralUnit, FunctionType.MOTOR, (motor >> 8) & 0xff, motor & 0xff, action]);
   }
-
   /**
    * Control the state of an audio zone.
    * @param centralUnit
