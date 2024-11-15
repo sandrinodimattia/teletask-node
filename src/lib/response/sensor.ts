@@ -1,80 +1,9 @@
-export type ParsedResponse = {
-  type: 'event' | 'acknowledge' | 'unknown';
-  command?: number;
-  payload?: Buffer;
-  messageId?: string;
-};
-
-export type PresetMode = 'day' | 'night' | 'standby' | 'off';
-
-/**
- * Parse the preset mode
- * @param value
- * @returns
- */
-export function parsePresetMode(value: number): PresetMode {
-  switch (value) {
-    case 0x1a:
-      return 'day';
-    case 0x19:
-      return 'night';
-    case 0x5d:
-      return 'standby';
-    default:
-      return 'off';
-  }
-}
-
-export type OperationMode = 'auto' | 'heat' | 'cool' | 'vent' | 'dry' | 'off';
-
-/**
- * Parse an operation mode
- * @param value
- * @returns
- */
-export function parseOperationMode(value: number): OperationMode {
-  switch (value) {
-    case 0x94:
-      return 'auto';
-    case 0x95:
-      return 'heat';
-    case 0x96:
-      return 'cool';
-    case 0x69:
-      return 'vent';
-    case 0x6a:
-      return 'dry';
-    default:
-      return 'off';
-  }
-}
-
-export type FanSpeed = 'auto' | 'low' | 'medium' | 'high';
-
-/**
- * Parse a fan speed
- * @param value
- * @returns
- */
-export function parseFanSpeed(value: number): FanSpeed {
-  switch (value) {
-    case 0x89:
-      return 'auto';
-    case 0x97:
-      return 'low';
-    case 0x98:
-      return 'medium';
-    case 0x99:
-      return 'high';
-    default:
-      return 'auto';
-  }
-}
+import { GetResponse } from './get-response';
 
 /**
  * Parse a sensor response into a strongly typed SensorState object
  */
-export function parseSensorResponse(response: ParsedResponse): SensorState {
+export function parseSensorResponse(response: GetResponse): SensorState {
   if (!response || !response.payload) {
     throw new Error('Invalid sensor response');
   }
@@ -256,95 +185,67 @@ export function parseLightSensor(payload: Buffer): SensorState {
   };
 }
 
-export type MotorState = {
-  moving: boolean;
-  direction: MotorDirection;
-  position: number;
-  targetPosition?: number;
-  protection: MotorProtectionState;
-  timeToFinishSeconds: number;
-  calibration: {
-    correctionAtZeroPercent: number;
-    correctionAtHundredPercent: number;
-  };
-};
+export type FanSpeed = 'auto' | 'low' | 'medium' | 'high';
 
 /**
- * Parse a motor response
- */
-export function parseMotorResponse(response: ParsedResponse): MotorState {
-  if (!response || !response.payload || response.payload.length < 9) {
-    throw new Error('Invalid motor response');
-  }
-
-  const payload = response.payload;
-  const direction = payload[0]; // Direction byte
-  const power = payload[1]; // Power/State byte
-  const protection = payload[2]; // Protection byte
-  const position = payload[3]; // Position percentage
-  const currentPosition = payload[4]; // Current position
-  const timeToFinish = (payload[5] << 8) | payload[6]; // Time to finish in centiseconds
-  const correctionZero = payload[7]; // Correction at 0%
-  const correctionHundred = payload[8]; // Correction at 100%
-
-  return {
-    moving: power === 0xff,
-    direction: parseMotorDirection(direction),
-    position: currentPosition,
-    targetPosition: position,
-    protection: parseMotorProtection(protection),
-    timeToFinishSeconds: timeToFinish / 100,
-    calibration: {
-      correctionAtZeroPercent: correctionZero,
-      correctionAtHundredPercent: correctionHundred
-    }
-  };
-}
-
-export type MotorDirection = 'up' | 'down' | 'stopped';
-
-/**
- * Parse the direction of a motor
- * @param direction
+ * Parse a fan speed
+ * @param value
  * @returns
  */
-export function parseMotorDirection(direction: number): MotorDirection {
-  switch (direction) {
-    case 0x01:
-      return 'up';
-    case 0x02:
-      return 'down';
+export function parseFanSpeed(value: number): FanSpeed {
+  switch (value) {
+    case 0x89:
+      return 'auto';
+    case 0x97:
+      return 'low';
+    case 0x98:
+      return 'medium';
+    case 0x99:
+      return 'high';
     default:
-      return 'stopped';
+      return 'auto';
   }
 }
-
-export type MotorProtectionState =
-  | 'notDefined'
-  | 'onControlled'
-  | 'onNotControlled'
-  | 'onOverruled'
-  | 'off'
-  | 'unknown';
+export type PresetMode = 'day' | 'night' | 'standby' | 'off';
 
 /**
- * Parse the motor protection state
- * @param protection
+ * Parse the preset mode
+ * @param value
  * @returns
  */
-export function parseMotorProtection(protection: number): MotorProtectionState {
-  switch (protection) {
-    case 0x00:
-      return 'notDefined';
-    case 0x01:
-      return 'onControlled';
-    case 0x02:
-      return 'onNotControlled';
-    case 0x03:
-      return 'onOverruled';
-    case 0x04:
+export function parsePresetMode(value: number): PresetMode {
+  switch (value) {
+    case 0x1a:
+      return 'day';
+    case 0x19:
+      return 'night';
+    case 0x5d:
+      return 'standby';
+    default:
       return 'off';
+  }
+}
+
+export type OperationMode = 'auto' | 'heat' | 'cool' | 'vent' | 'dry' | 'off';
+
+/**
+ * Parse an operation mode
+ * @param value
+ * @returns
+ */
+export function parseOperationMode(value: number): OperationMode {
+  switch (value) {
+    case 0x94:
+      return 'auto';
+    case 0x95:
+      return 'heat';
+    case 0x96:
+      return 'cool';
+    case 0x69:
+      return 'vent';
+    case 0x6a:
+      return 'dry';
     default:
-      return 'unknown';
+      return 'off';
   }
 }

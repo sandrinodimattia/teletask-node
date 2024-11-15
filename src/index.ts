@@ -10,8 +10,18 @@ import {
 import { TeletaskOptions } from './types/config';
 import { StateChange, StateChangeCallback } from './types/state';
 
-import { ParsedResponse } from './lib/utils';
+import {
+  validateComponentParameters,
+  validateMotorAction,
+  validateMotorPosition,
+  validateRange
+} from './lib/validation';
+
 import { TeletaskConnection } from './lib/connection';
+import { GetResponse } from './lib/response/get-response';
+import { MotorState, parseMotorResponse } from './lib/response/motor';
+import { parseRelayResponse, RelayState } from './lib/response/relay';
+import { DimmerState, parseDimmerResponse } from './lib/response/dimmer';
 
 export class TeletaskClient {
   /***
@@ -28,6 +38,16 @@ export class TeletaskClient {
    * Subscribers for state changes.
    */
   private readonly subscribers: Map<FunctionType, Set<StateChangeCallback>>;
+
+  /**
+   * Timeout for waiting for a GET response.
+   */
+  private readonly responseTimeout = 4000; // Default timeout for queries
+
+  /**
+   * Response handlers for GET commands.
+   */
+  private responseHandlers: Map<string, (response: GetResponse) => void> = new Map();
 
   /**
    * TELETASK client.
@@ -133,14 +153,27 @@ export class TeletaskClient {
    */
   private buildCommand(command: number, parameters: number[]): Buffer {
     const paramBuffer = Buffer.from(parameters);
+
+    // Calculate the total length
+    // Length = STX (1) + Length byte (1) + Command byte (1) + Parameters + Checksum (1)
     const length = 3 + paramBuffer.length;
+
+    // Create buffer with space for all bytes including checksum
     const buffer = Buffer.alloc(length + 1);
 
     buffer[0] = 0x02; // STX
-    buffer[1] = length;
-    buffer[2] = command;
+    buffer[1] = length; // Length
+    buffer[2] = command; // Command (0x06 for GET)
     paramBuffer.copy(buffer, 3);
 
+    /**
+     * Alternative way to build the buffer:
+     * for (let i = 0; i < parameters.length; i++) {
+     *    buffer[i + 3] = parameters[i] & 0xff;
+     * }
+     */
+
+    // Calculate and write checksum
     let checksum = 0;
     for (let i = 0; i < length; i++) {
       checksum += buffer[i];
@@ -165,46 +198,66 @@ export class TeletaskClient {
   }
 
   /**
-   * Calculate the checksum of the incoming data.
-   */
-  private calculateChecksum(data: Buffer): number {
-    return data.reduce((sum, byte) => sum + byte, 0) & 0xff;
-  }
-
-  /**
    * Handles a response from the unit.
    * @param data
    * @returns
    */
   private handleResponse(data: Buffer): void {
-    // Acknowledge byte
-    if (data.length === 1 && data[0] === 0x0a) {
-      return;
-    }
+    // Process each byte to find complete messages
+    let currentIndex = 0;
+    while (currentIndex < data.length) {
+      // Check for acknowledge byte
+      if (data[currentIndex] === 0x0a) {
+        currentIndex++;
+        continue;
+      }
 
-    // Invalid start byte
-    if (data[0] !== 0x02) {
-      return;
-    }
+      // Check for STX
+      if (data[currentIndex] === 0x02) {
+        if (currentIndex + 1 >= data.length) {
+          break;
+        }
 
-    // Extract payload
-    const command = data[2];
-    if (command === 0x10) {
-      this.handleEvent(data.slice(3, -1));
-    } else {
-      throw new Error(`Unknown command: ${command}`);
+        const messageLength = data[currentIndex + 1];
+        const messageEnd = currentIndex + messageLength + 1;
+
+        // Make sure we have complete message
+        if (messageEnd > data.length) {
+          break;
+        }
+
+        // Extract complete message
+        const message = data.slice(currentIndex, messageEnd);
+        const command = message[2];
+        if (command === Command.LOG) {
+          this.handleEvent(message);
+        } else if (command === Command.KEEP_ALIVE) {
+          // Do nothing
+        } else if (command === Command.RESPONSE) {
+          this.handleGetResponse(message);
+        } else {
+          throw new Error(`Unknown command: ${command}`);
+        }
+
+        // Move to next message
+        currentIndex = messageEnd;
+      } else {
+        // Skip unknown byte
+        currentIndex++;
+      }
     }
   }
 
   /**
-   * Handle an incoming event.
+   * Handle an incoming log event.
    */
   private handleEvent(data: Buffer): void {
+    const payload = data.slice(3, -1);
     const stateChange: StateChange = {
-      centralUnit: data[0],
-      functionType: data[1] as FunctionType,
-      number: (data[2] << 8) | data[3],
-      value: data[5]
+      centralUnit: payload[0],
+      functionType: payload[1] as FunctionType,
+      number: (payload[2] << 8) | payload[3],
+      value: payload[5]
     };
 
     // Notify specific subscribers
@@ -267,11 +320,91 @@ export class TeletaskClient {
       }
     }
   }
+
+  /**
+   * Sends a GET command and waits for its response
+   */
+  private async waitForGet(parameters: number[], messageId: string): Promise<GetResponse> {
+    return new Promise((resolve, reject) => {
+      const timeoutId = setTimeout(() => {
+        this.responseHandlers.delete(messageId);
+        reject(new Error(`Response timeout for GET command: ${messageId}`));
+      }, this.responseTimeout);
+
+      // Set up response handler before sending command
+      this.responseHandlers.set(messageId, (response: GetResponse) => {
+        clearTimeout(timeoutId);
+        this.responseHandlers.delete(messageId);
+        resolve(response);
+      });
+
+      try {
+        this.sendCommand(Command.GET, parameters);
+      } catch (error) {
+        clearTimeout(timeoutId);
+        this.responseHandlers.delete(messageId);
+        reject(error);
+      }
+    });
+  }
+
+  /**
+   * Handle the response of a GET command.
+   * @param data
+   */
+  private handleGetResponse(data: Buffer): void {
+    const payload = data.slice(3, -1);
+    const centralUnit = payload[0];
+    const functionType = payload[1];
+    const number = (payload[2] << 8) | payload[3];
+
+    // Send response to handler for this specific message
+    const messageId = `${functionType}_${centralUnit}_${number}`;
+    const handler = this.responseHandlers.get(messageId);
+    if (handler) {
+      handler({
+        centralUnit,
+        functionType,
+        number,
+        payload
+      });
+      this.responseHandlers.delete(messageId);
+    }
+  }
+
   /**
    * Send a keep-alive command.
    */
   private sendKeepAlive(): void {
     this.sendCommand(0x0b, []);
+  }
+
+  /**
+   * Query the status of a relay
+   */
+  public async queryRelay(centralUnit: number, relay: number): Promise<RelayState> {
+    validateRange(centralUnit, 1, 10, 'Central unit');
+    validateRange(relay, 0, 0xffff, 'Relay number');
+
+    // Parameters array:
+    // [Central Unit, Function Type, Number MSB, Number LSB]
+    const parameters = [centralUnit, FunctionType.RELAY, (relay >> 8) & 0xff, relay & 0xff];
+
+    // Format according to TDS spec:
+    // STX | Length | Command | Central Unit | Function | Number MSB | Number LSB | Checksum
+
+    // Example of what gets sent for relay 1 on central unit 1:
+    // 02 07 06 01 01 00 01 12
+    //  |  |  |  |  |  |  |  └─ Checksum
+    //  |  |  |  |  |  └──┴──── Relay number (0x0001)
+    //  |  |  |  |  └───────── Function type (RELAY = 0x01)
+    //  |  |  |  └────────── Central unit (0x01)
+    //  |  |  └─────────── Command (GET = 0x06)
+    //  |  └──────────── Length (7 bytes)
+    //  └───────────── STX (0x02)
+    const messageId = `${FunctionType.RELAY}_${centralUnit}_${relay}`;
+    const response = await this.waitForGet(parameters, messageId);
+    return parseRelayResponse(response);
   }
 
   /**
@@ -291,6 +424,31 @@ export class TeletaskClient {
   }
 
   /**
+   * Query the status of a dimmer
+   */
+  public async queryDimmer(centralUnit: number, dimmer: number): Promise<DimmerState> {
+    validateRange(centralUnit, 1, 10, 'Central unit');
+    validateRange(dimmer, 0, 0xffff, 'Dimmer number');
+
+    // Parameters array:
+    // [Central Unit, Function Type, Number MSB, Number LSB]
+    const parameters = [centralUnit, FunctionType.DIMMER, (dimmer >> 8) & 0xff, dimmer & 0xff];
+
+    // Example of what gets sent for dimmer 1 on central unit 1:
+    // 02 07 06 01 02 00 01 13
+    //  |  |  |  |  |  |  |  └─ Checksum
+    //  |  |  |  |  |  └──┴──── Dimmer number (0x0001)
+    //  |  |  |  |  └───────── Function type (DIMMER = 0x02)
+    //  |  |  |  └────────── Central unit (0x01)
+    //  |  |  └─────────── Command (GET = 0x06)
+    //  |  └──────────── Length (7 bytes)
+    //  └───────────── STX (0x02)
+    const messageId = `${FunctionType.DIMMER}_${centralUnit}_${dimmer}`;
+    const response = await this.waitForGet(parameters, messageId);
+    return parseDimmerResponse(response);
+  }
+
+  /**
    * Control the state of a dimmer.
    * @param centralUnit
    * @param dimmer
@@ -305,14 +463,68 @@ export class TeletaskClient {
   }
 
   /**
-   * Control the state of a motor.
-   * @param centralUnit
-   * @param motor
-   * @param action
+   * Query a motor's current state
    */
-  public async setMotor(centralUnit: number, motor: number, action: MotorAction): Promise<void> {
-    this.sendCommand(Command.SET, [centralUnit, FunctionType.MOTOR, (motor >> 8) & 0xff, motor & 0xff, action]);
+  public async queryMotor(centralUnit: number, motor: number): Promise<MotorState> {
+    validateRange(centralUnit, 1, 10, 'Central unit');
+    validateRange(motor, 0, 0xffff, 'Motor number');
+
+    // Parameters array:
+    // [Central Unit, Function Type, Number MSB, Number LSB]
+    const parameters = [centralUnit, FunctionType.MOTOR, (motor >> 8) & 0xff, motor & 0xff];
+
+    const messageId = `${FunctionType.MOTOR}_${centralUnit}_${motor}`;
+    const response = await this.waitForGet(parameters, messageId);
+    return parseMotorResponse(response);
   }
+
+  /**
+   * Enhanced setMotor method with proper position handling
+   */
+  public async setMotor(centralUnit: number, motor: number, actionOrPosition: MotorAction | number): Promise<void> {
+    validateComponentParameters(centralUnit, motor, 'Motor');
+
+    if (typeof actionOrPosition === 'number') {
+      // Handle position setting
+      validateMotorPosition(actionOrPosition);
+      await this.sendCommand(Command.SET, [
+        centralUnit,
+        FunctionType.MOTOR,
+        (motor >> 8) & 0xff,
+        motor & 0xff,
+        MotorAction.MOTOR_GO_TO_POSITION,
+        actionOrPosition
+      ]);
+    } else {
+      // Handle regular motor actions
+      validateMotorAction(actionOrPosition);
+      await this.sendCommand(Command.SET, [
+        centralUnit,
+        FunctionType.MOTOR,
+        (motor >> 8) & 0xff,
+        motor & 0xff,
+        actionOrPosition
+      ]);
+    }
+  }
+  /**
+   * Helper method to move motor to position
+   */
+  public async setMotorPosition(centralUnit: number, motor: number, position: number): Promise<void> {
+    return this.setMotor(centralUnit, motor, position);
+  }
+
+  /**
+   * Helper method for sun protection
+   */
+  public async setMotorSunProtection(centralUnit: number, motor: number, enabled: boolean): Promise<void> {
+    if (enabled) {
+      return this.setMotor(centralUnit, motor, MotorAction.MOTOR_SUN_PROTECTION);
+    } else {
+      return this.setMotor(centralUnit, motor, MotorAction.STOP);
+    }
+  }
+
   /**
    * Control the state of an audio zone.
    * @param centralUnit

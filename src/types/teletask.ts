@@ -20,6 +20,7 @@ export enum Command {
   LOG = 0x03,
   GET = 0x06,
   SET = 0x07,
+  RESPONSE = 0x10,
   KEEP_ALIVE = 0x0b
 }
 
@@ -41,7 +42,9 @@ export enum MotorAction {
   START_STOP = 0x06,
   UP_STOP = 0x07,
   DOWN_STOP = 0x08,
-  UP_DOWN = 0x37
+  UP_DOWN = 0x37,
+  MOTOR_GO_TO_POSITION = 0x0b,
+  MOTOR_SUN_PROTECTION = 0x0f
 }
 
 export enum AudioAction {
