@@ -128,3 +128,11 @@ dist
 .yarn/build-state.yml
 .yarn/install-state.gz
 .pnp.*
+
+# Exclude all files which don't need to be in the npm package
+.husky
+src/
+.eslintrc.json
+.prettierrc
+tsconfig.json
+tsconfig.build.json
